@@ -97,28 +97,7 @@ npm run dev
 
 ---
 
-## Production Deployment
 
-| Service | Host | Purpose |
-|---|---|---|
-| **Frontend** | Vercel | React app deployment |
-| **Backend** | Render | FastAPI server and NLP engine |
-
-### Backend (Render)
-1. Create a Web Service with Root Directory set to `backend`.
-2. **Build command:** `pip install -r requirements.txt && python -m spacy download en_core_web_sm`
-3. **Start command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4. Add environment variable:
-   - `GEMINI_API_KEY=your_api_key`
-5. Deploy and copy your Web Service URL.
-
-### Frontend (Vercel)
-1. Import the repository and set Root Directory to `frontend`.
-2. Add environment variable:
-   - `VITE_API_URL` — your Render backend URL, e.g. `https://your-backend.onrender.com` (no trailing slash).
-3. Deploy.
-
----
 
 ## Disclaimer
 This system is for educational purposes only. It does not provide professional legal advice.
