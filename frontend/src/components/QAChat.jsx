@@ -25,7 +25,8 @@ export default function QAChat({ documentContext }) {
       formData.append("question", q);
       formData.append("context", documentContext || "");
 
-      const res = await fetch("http://127.0.0.1:8000/ask", {
+      const apiUrl = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+      const res = await fetch(`${apiUrl}/ask`, {
         method: "POST",
         body: formData,
       });
