@@ -24,7 +24,7 @@ from nltk.stem import WordNetLemmatizer, PorterStemmer
 from nltk.tokenize import word_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-import google.generativeai as genai
+from google import genai
 
 # ── Load .env ────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -46,11 +46,35 @@ except OSError:
     nlp = spacy.load("en_core_web_sm")
 
 # ── Gemini LLM ───────────────────────────────────────────────────────────────
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-lite-latest", "gemini-3.5-flash"]
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-3.8-flash")
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
-    gemini_model = None
+    gemini_client = None
+
+
+def call_gemini(prompt: str) -> str:
+    """Call Gemini API with automatic model fallback on 503 errors."""
+    if not gemini_client:
+        raise RuntimeError("LLM not configured")
+    last_error = None
+    for model_name in GEMINI_MODELS:
+        try:
+            response = gemini_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            last_error = e
+            error_str = str(e)
+            # If 503 (overloaded) or 429 (rate limit), try next model
+            if "503" in error_str or "UNAVAILABLE" in error_str or "429" in error_str:
+                print(f"Model {model_name} unavailable, trying next...")
+                continue
+            # For other errors, raise immediately
+            raise
+    raise last_error
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(title="Legal Document Analyzer")
@@ -183,7 +207,7 @@ def call_llm_structured(text: str) -> dict:
     Single LLM call that returns a clean JSON with user-friendly info.
     Strictly document-grounded — LLM is told not to invent anything.
     """
-    if not gemini_model:
+    if not gemini_client:
         return _default_llm_response("LLM not configured. Please add your GEMINI_API_KEY in the .env file.")
 
     prompt = f"""
@@ -230,8 +254,7 @@ Document Text:
 {text[:3500]}
 """
     try:
-        response = gemini_model.generate_content(prompt)
-        raw = response.text.strip()
+        raw = call_gemini(prompt).strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -312,7 +335,7 @@ async def ask_question(question: str = Form(...), context: str = Form(...)):
     Unit 4 — Question Answering.
     Answers ONLY from the document. Returns plain text answer.
     """
-    if not gemini_model:
+    if not gemini_client:
         return {"answer": "LLM not configured. Please add your GEMINI_API_KEY in the .env file."}
 
     prompt = f"""
@@ -328,8 +351,8 @@ Question: {question}
 
 Answer:"""
     try:
-        response = gemini_model.generate_content(prompt)
-        return {"answer": response.text.strip()}
+        answer = call_gemini(prompt)
+        return {"answer": answer.strip()}
     except Exception as e:
         return {"answer": f"Error getting answer: {str(e)}"}
 
