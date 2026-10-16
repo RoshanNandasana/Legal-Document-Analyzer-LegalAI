@@ -10,6 +10,9 @@ import io
 import os
 import json
 import string
+import asyncio
+
+import docx
 from collections import Counter
 
 import nltk
@@ -74,7 +77,9 @@ def call_gemini(prompt: str) -> str:
                 continue
             # For other errors, raise immediately
             raise
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("All Gemini models failed")
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(title="Legal Document Analyzer")
@@ -92,23 +97,21 @@ app.add_middleware(
 # HELPER: Text Extraction
 # ══════════════════════════════════════════════════════════════════════════════
 
-def extract_text(file_bytes: bytes, filename: str) -> str:
+def extract_text(file_bytes: bytes, filename: str) -> tuple:
+    """Extract text and page count in a single pass (avoids opening PDF twice)."""
     if filename.lower().endswith(".pdf"):
         text = ""
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            page_count = len(pdf.pages)
             for i, page in enumerate(pdf.pages):
                 page_text = page.extract_text()
                 if page_text:
                     text += f"\n--- PAGE {i + 1} ---\n" + page_text + "\n"
-        return text
-    return file_bytes.decode("utf-8", errors="ignore")
-
-
-def get_page_count(file_bytes: bytes, filename: str) -> int:
-    if filename.lower().endswith(".pdf"):
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            return len(pdf.pages)
-    return 1
+        return text, page_count
+    if filename.lower().endswith(".docx"):
+        doc = docx.Document(io.BytesIO(file_bytes))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip()), 1
+    return file_bytes.decode("utf-8", errors="ignore"), 1
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -135,20 +138,25 @@ def run_nlp_pipeline(text: str) -> dict:
     bigram_freq  = Counter(list(bigrams(filtered))).most_common(8)
     trigram_freq = Counter(list(trigrams(filtered))).most_common(6)
 
-    # ── Unit 2/4: POS Tagging + NER (spaCy) ──────────────────────────────────
-    doc = nlp(text[:3000])
-    pos_tags = [
-        {"word": t.text, "pos": t.pos_}
-        for t in doc if not t.is_space and not t.is_punct
-    ][:25]
-
-    allowed = {"PERSON", "ORG", "DATE", "MONEY", "GPE", "LAW"}
-    seen = set()
+    # ── Unit 2/4: POS Tagging + NER (spaCy) — chunked for full coverage ─────
+    SPACY_CHUNK = 3000
+    SPACY_MAX   = 30000          # analyse up to ~30k chars (10× previous)
+    pos_tags = []
+    allowed  = {"PERSON", "ORG", "DATE", "MONEY", "GPE", "LAW"}
+    seen     = set()
     entities = []
-    for ent in doc.ents:
-        if ent.label_ in allowed and ent.text.strip() not in seen:
-            entities.append({"text": ent.text.strip(), "label": ent.label_})
-            seen.add(ent.text.strip())
+    for start in range(0, min(len(text), SPACY_MAX), SPACY_CHUNK):
+        chunk_doc = nlp(text[start:start + SPACY_CHUNK])
+        if len(pos_tags) < 25:
+            pos_tags.extend([
+                {"word": t.text, "pos": t.pos_}
+                for t in chunk_doc if not t.is_space and not t.is_punct
+            ])
+        for ent in chunk_doc.ents:
+            if ent.label_ in allowed and ent.text.strip() not in seen:
+                entities.append({"text": ent.text.strip(), "label": ent.label_})
+                seen.add(ent.text.strip())
+    pos_tags = pos_tags[:25]
 
     # ── Unit 4: TF-IDF ───────────────────────────────────────────────────────
     sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 20]
@@ -251,7 +259,7 @@ Replace "field_1", "field_2", etc. with the actual lowercase names of the import
 Include up to 5 important sections relevant to this document type.
 
 Document Text:
-{text[:3500]}
+{text[:8000]}
 """
     try:
         raw = call_gemini(prompt).strip()
@@ -297,18 +305,17 @@ async def analyze_document(file: UploadFile = File(...)):
     file_bytes = await file.read()
     filename   = file.filename
 
-    # Extract text
-    raw_text   = extract_text(file_bytes, filename)
-    page_count = get_page_count(file_bytes, filename)
+    # Extract text + page count in a single pass
+    raw_text, page_count = extract_text(file_bytes, filename)
 
     if not raw_text.strip():
         return {"error": "Could not extract text from the document."}
 
-    # 1. Traditional NLP pipeline (syllabus concepts)
-    nlp_data = run_nlp_pipeline(raw_text)
-
-    # 2. LLM structured analysis (user-friendly)
-    llm_data = call_llm_structured(raw_text)
+    # Run NLP and Gemini in parallel (concurrent execution for speed)
+    nlp_data, llm_data = await asyncio.gather(
+        asyncio.to_thread(run_nlp_pipeline, raw_text),
+        asyncio.to_thread(call_llm_structured, raw_text),
+    )
 
     return {
         # File info

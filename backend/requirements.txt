@@ -4,6 +4,7 @@ python-multipart
 spacy
 google-genai
 pdfplumber
+python-docx
 scikit-learn
 nltk
 python-dotenv
