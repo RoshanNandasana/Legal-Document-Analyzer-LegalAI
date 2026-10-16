@@ -8,6 +8,7 @@ Returns two layers of data:
 
 import io
 import os
+import re
 import json
 import string
 import asyncio
@@ -117,6 +118,57 @@ def extract_text(file_bytes: bytes, filename: str) -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPER: Traditional NLP (Syllabus Unit 2, 3, 4)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def assess_clause_risk(clause_text: str) -> dict:
+    """
+    Rule-based clause risk screening using traditional NLP.
+    Returns a score, category, and matched indicators.
+    """
+    text = clause_text.lower()
+    tokens = word_tokenize(text)
+    score = 0
+    matched_indicators = []
+
+    attention_patterns = {
+        r"\bterminate immediately\b": ("Immediate termination", 45),
+        r"\bwithout (?:any )?notice\b": ("No notice requirement", 35),
+        r"\bunlimited liability\b": ("Unlimited liability", 45),
+        r"\bsole discretion\b": ("Unilateral discretion", 30),
+        r"\bwaive all rights\b": ("Broad waiver of rights", 45),
+    }
+    review_patterns = {
+        r"\bindemnif(?:y|ies|ication)\b": ("Indemnity provision", 20),
+        r"\bconfidential(?:ity)?\b": ("Confidentiality provision", 15),
+        r"\bpenalt(?:y|ies)\b": ("Penalty provision", 20),
+        r"\bautomatic renewal\b": ("Automatic renewal", 20),
+        r"\bunilateral(?:ly)?\b": ("Unilateral provision", 20),
+    }
+
+    for pattern, (label, points) in attention_patterns.items():
+        if re.search(pattern, text):
+            score += points
+            matched_indicators.append({"label": label, "points": points})
+
+    for pattern, (label, points) in review_patterns.items():
+        if re.search(pattern, text):
+            score += points
+            matched_indicators.append({"label": label, "points": points})
+
+    score = min(score, 100)
+
+    if score >= 70:
+        level = "Attention"
+    elif score >= 35:
+        level = "Review"
+    else:
+        level = "Standard"
+
+    return {
+        "risk_score": score,
+        "risk_level": level,
+        "matched_indicators": matched_indicators,
+    }
+
 
 def run_nlp_pipeline(text: str) -> dict:
     """Run all traditional NLP — tokens, NER, POS, N-grams, TF-IDF."""
@@ -268,7 +320,15 @@ Document Text:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return json.loads(raw.strip())
+        data = json.loads(raw.strip())
+        for section in data.get("important_sections", []):
+            clause_text = (
+                section.get("title", "") + " "
+                + section.get("what_it_says", "") + " "
+                + section.get("simple_explanation", "")
+            )
+            section.update(assess_clause_risk(clause_text))
+        return data
     except Exception as e:
         print(f"LLM/JSON error: {e}")
         return _default_llm_response(f"API Error: {str(e)}")
